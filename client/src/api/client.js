@@ -21,6 +21,7 @@ export const gmailApi = {
   sync: () => api.post('/gmail/sync').then(r => r.data),
   disconnect: () => api.post('/gmail/disconnect').then(r => r.data),
   history: () => api.get('/gmail/sync-history').then(r => r.data),
+  confirm: (jobId, status) => api.post(`/gmail/confirm/${jobId}`, { status }).then(r => r.data),
 };
 
 export const statsApi = {

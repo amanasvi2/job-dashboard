@@ -4,7 +4,6 @@ const fs = require('fs');
 
 const DB_PATH = path.join(__dirname, '../../data/jobs.db');
 
-// Ensure data directory exists
 const dataDir = path.dirname(DB_PATH);
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
@@ -12,11 +11,9 @@ if (!fs.existsSync(dataDir)) {
 
 const db = new Database(DB_PATH);
 
-// Enable WAL mode for better performance
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
-// Initialize schema
 db.exec(`
   CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,7 +39,9 @@ db.exec(`
     sync_date TEXT DEFAULT (datetime('now')),
     emails_scanned INTEGER DEFAULT 0,
     jobs_imported INTEGER DEFAULT 0,
+    jobs_updated INTEGER DEFAULT 0,
     jobs_skipped INTEGER DEFAULT 0,
+    unclassified INTEGER DEFAULT 0,
     details TEXT DEFAULT '[]'
   );
 
@@ -54,5 +53,19 @@ db.exec(`
     updated_at TEXT DEFAULT (datetime('now'))
   );
 `);
+
+// Migrate: add new columns if they don't exist yet
+const migrations = [
+  `ALTER TABLE jobs ADD COLUMN status_changed_date TEXT`,
+  `ALTER TABLE jobs ADD COLUMN last_email_date TEXT`,
+  `ALTER TABLE jobs ADD COLUMN confidence TEXT DEFAULT 'High'`,
+  `ALTER TABLE jobs ADD COLUMN needs_review INTEGER DEFAULT 0`,
+  `ALTER TABLE gmail_sync_log ADD COLUMN jobs_updated INTEGER DEFAULT 0`,
+  `ALTER TABLE gmail_sync_log ADD COLUMN unclassified INTEGER DEFAULT 0`,
+];
+
+for (const sql of migrations) {
+  try { db.exec(sql); } catch (_) { /* column already exists */ }
+}
 
 module.exports = db;
