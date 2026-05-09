@@ -47,6 +47,7 @@ export default function GmailPage() {
   const [connected, setConnected] = useState(false);
   const [configured, setConfigured] = useState(true);
   const [syncing, setSyncing] = useState(false);
+  const [fixing, setFixing] = useState(false);
   const [lastResult, setLastResult] = useState(null);
   const [history, setHistory] = useState([]);
   const [loadingStatus, setLoadingStatus] = useState(true);
@@ -80,6 +81,34 @@ export default function GmailPage() {
     await gmailApi.disconnect();
     setConnected(false);
     toast.success('Gmail disconnected');
+  }
+
+  async function handleReparseTitles() {
+    setFixing(true);
+    const toastId = toast.loading('Re-parsing job titles from email subjects…');
+    try {
+      const result = await gmailApi.reparseTitles();
+      toast.success(`Fixed ${result.updated} of ${result.scanned} "Unknown Position" entries`, { id: toastId, duration: 5000 });
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Re-parse failed', { id: toastId });
+    } finally {
+      setFixing(false);
+    }
+  }
+
+  async function handleClearAndResync() {
+    if (!confirm('This will delete all Gmail-imported jobs with missing titles so they can be re-imported with improved parsing. Manually-edited jobs will NOT be affected. Continue?')) return;
+    setFixing(true);
+    const toastId = toast.loading('Clearing "Unknown Position" entries…');
+    try {
+      const { deleted } = await gmailApi.clearImports(true);
+      toast.success(`Cleared ${deleted} entries. Run Sync Gmail to re-import them.`, { id: toastId, duration: 6000 });
+      gmailApi.history().then(setHistory).catch(() => {});
+    } catch (err) {
+      toast.error('Failed to clear imports', { id: toastId });
+    } finally {
+      setFixing(false);
+    }
   }
 
   async function handleSync() {
@@ -156,6 +185,36 @@ export default function GmailPage() {
           </div>
         )}
       </div>
+
+      {/* Fix existing imports */}
+      {connected && (
+        <div className="card space-y-3">
+          <h3 className="font-semibold text-white">Fix Existing Imports</h3>
+          <p className="text-sm text-gray-400">
+            If previously synced jobs show <span className="text-yellow-300 font-medium">"Unknown Position"</span> as title,
+            use these tools to fix them without a full re-sync.
+          </p>
+          <div className="flex gap-3 flex-wrap">
+            <button
+              className="btn-secondary text-sm"
+              onClick={handleReparseTitles}
+              disabled={fixing}
+            >
+              {fixing ? '⏳ Fixing…' : '✏️ Re-parse titles'}
+            </button>
+            <button
+              className="text-sm px-3 py-1.5 rounded-lg border border-orange-500/30 text-orange-400 hover:bg-orange-500/10 transition-colors disabled:opacity-50"
+              onClick={handleClearAndResync}
+              disabled={fixing}
+            >
+              🗑 Clear unknown titles &amp; re-sync
+            </button>
+          </div>
+          <p className="text-xs text-gray-600">
+            "Re-parse titles" only updates jobs with missing titles — safe to run any time. "Clear &amp; re-sync" deletes entries with unknown titles so the next sync re-imports them with improved accuracy.
+          </p>
+        </div>
+      )}
 
       {/* Last sync result */}
       {lastResult && (

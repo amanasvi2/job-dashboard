@@ -218,9 +218,17 @@ function extractCompanyFromATS(from, subject, body) {
 
   // Display name from From header — only trust for ATS senders (prevents "HR" being the company)
   if (displayName && isATS) {
-    const cleaned = displayName
+    let cleaned = displayName
       .replace(/\b(recruiting|talent acquisition|talent|hr team|hr|careers|team|hiring|jobs?|no.?reply|noreply|notifications?|updates?|do.not.reply)\b/gi, '')
       .replace(/\s+/g, ' ').trim();
+
+    // "Name from Company" (e.g. "Lisa Hurst from Visa") → extract just "Company"
+    const fromMatch = cleaned.match(/\bfrom\s+([A-Z][a-zA-Z0-9\s&,.']{2,40})\s*$/);
+    if (fromMatch) {
+      const co = fromMatch[1].trim();
+      if (co.length > 2 && !isGenericWord(co) && !isActionPhrase(co)) return co;
+    }
+
     if (cleaned.length > 2 && cleaned.length < 50 && /[A-Z]/.test(cleaned[0])) return cleaned;
   }
 
@@ -230,11 +238,10 @@ function extractCompanyFromATS(from, subject, body) {
 
   // Body patterns — require leading uppercase (no /i flag on capture group)
   const bodyPatterns = [
-    /(?:applying to|thank you for applying to|application to)\s+([A-Z][a-zA-Z0-9\s&,.']{1,40}?)(?:\s+for\b|\s+is\b|\s+has\b|[,!.]|$)/,
-    /(?:team at|from the team at|from the folks at|the team at)\s+([A-Z][a-zA-Z0-9\s&,.']{1,50})(?:[,!.]|$)/,
+    /(?:applying to|thank you for applying to|application to)\s+([A-Z][a-zA-Z0-9\s&,.'`-]{1,50}?)(?:\s+for\b|\s+is\b|\s+has\b|[,!.]|$)/,
+    /(?:team at|from the team at|from the folks at|the team at)\s+([A-Z][a-zA-Z0-9\s&,.'`-]{1,50})(?:[,!.]|$)/,
     /^([A-Z][a-zA-Z\s&]{2,40})\s+(?:Recruiting|Talent Acquisition|Talent Team|HR Team|Careers|Hiring Team)/m,
-    // "at [Company]." at end of sentence
-    /\bat\s+([A-Z][a-zA-Z0-9\s&,.']{1,40}?)\s*[.!](?:\s|$)/,
+    /\bat\s+([A-Z][a-zA-Z0-9\s&,.'`-]{1,40}?)\s*[.!](?:\s|$)/,
   ];
   for (const pattern of bodyPatterns) {
     const m = body.match(pattern);
@@ -259,13 +266,24 @@ function extractCompanyFromATS(from, subject, body) {
 }
 
 function isActionPhrase(s) {
-  const actionWords = ['phone','screen','interview','technical','update','invitation','schedule','next','steps','congratulations','unfortunately'];
+  const actionWords = [
+    'phone','screen','interview','technical','update','invitation','schedule','next','steps',
+    'congratulations','unfortunately','thanks','thank','looking','let\'s','lets','please',
+    'hello','hi','dear','greetings','reminder','notice','regarding','fyi','action','important',
+    'response','confirmation','replied','forwarded','decision','outcome','status',
+  ];
   return actionWords.some(w => s.toLowerCase().startsWith(w));
 }
 
 function isGenericWord(s) {
-  const generic = ['your','the','we','our','thank','please','hello','hi','dear','application','position','role',
-    'this','that','it','at','in','on','for','of','update','via','through','with','from','about'];
+  const generic = [
+    'your','the','we','our','thank','thanks','please','hello','hi','dear','application',
+    'position','role','this','that','it','at','in','on','for','of','update','via',
+    'through','with','from','about','regarding','reminder','notice','alert','sorry',
+    'congratulations','greetings','fyi','action','important','re','fw','fwd',
+    'a','an','is','has','was','be','message','letter','notification','info','information',
+    'response','confirmation','decision','outcome','status',
+  ];
   return generic.includes(s.toLowerCase().split(' ')[0]);
 }
 
@@ -279,30 +297,56 @@ function parseSubjectForBoth(subject) {
   const s = subject.trim();
   let m;
 
-  // "Application for Title at Company" / "Application for Title - Company"
-  m = s.match(/^(?:re:\s*)?application\s+(?:received\s+)?(?:for|–|-)\s+(.+?)\s+(?:at|@)\s+(.+?)(?:\s*[-–|,]|$)/i);
+  // Helper: match and validate uppercase start (works with /i flag on trigger, strict on capture)
+  const upperStart = (str) => str && /^[A-Z]/.test(str);
+
+  // "Application for Title at Company" / "Your application for Title at Company"
+  // (no ^ anchor — handles "Your application for...", "Re: application for...")
+  m = s.match(/\bapplication\s+(?:received\s+)?(?:for|–|-)\s+(.+?)\s+(?:at|@)\s+(.+?)(?:\s*[-–|,]|$)/i);
   if (m) return clean2(m[1], m[2]);
 
-  // "Application for Title - Company" (dash-separated, no "at")
-  m = s.match(/^(?:re:\s*)?application(?:\s+received)?\s+(?:for|–|-)\s+(.+?)\s*[-–]\s*(.+?)(?:\s*[-–]|$)/i);
+  // "Application for Title - Company" (dash-separated, no "at") — "for" required to avoid false positives
+  m = s.match(/\bapplication(?:\s+received)?\s+for\s+(.+?)\s*[-–]\s*(.+?)(?:\s*[-–]|$)/i);
   if (m) return clean2(m[1], m[2]);
 
   // "Company received your application for Title"
   m = s.match(/^(.+?)\s+received\s+your\s+application\s+for\s+(.+)/i);
-  if (m) return clean2(m[2], m[1]);  // title=m[2], company=m[1]
+  if (m) return clean2(m[2], m[1]);
 
-  // "Your application for Title at Company"
-  m = s.match(/your\s+application\s+for\s+(?:the\s+)?(.+?)\s+(?:at|@)\s+(.+?)(?:\s*[-–,]|$)/i);
-  if (m) return clean2(m[1], m[2]);
+  // "Company Application -- Title" or "Company Application: Title" (e.g. "Stripe Application: SWE")
+  m = s.match(/^([A-Z][a-zA-Z0-9\s&,.']{1,35}?)\s+application\s*[-–:\s]+(.+?)(?:\s*[-–,]|$)/i);
+  if (m && !isGenericWord(m[1]) && !isActionPhrase(m[1])) {
+    const r = clean2(m[2], m[1]);
+    if (r.title) return r;
+  }
 
-  // "Title at Company - Application..." or "Title at Company (Application...)"
+  // "applying to/at Company" or "applied to/at Company" (e.g. "Thank you for applying to Google")
+  m = s.match(/\bappl(?:ying|ied|y)\s+(?:to|at)\s+([a-zA-Z][a-zA-Z0-9\s&,.'-]{1,50}?)(?:[!.,]|\s+for\b|$)/i);
+  if (m && upperStart(m[1])) return { title: null, company: cleanStr(m[1]) };
+
+  // "application to Company" (e.g. "Regarding your application to XPENG")
+  m = s.match(/\bapplication\s+to\s+([a-zA-Z][a-zA-Z0-9\s&,.'-]{1,50}?)(?:[!.,]|\s+for\b|$)/i);
+  if (m && upperStart(m[1])) return { title: null, company: cleanStr(m[1]) };
+
+  // "interest in Company" (e.g. "Thank you for your interest in Stripe" or "Angle Health, Archita")
+  m = s.match(/\binterest\s+in\s+([a-zA-Z][a-zA-Z0-9\s&,.'-]{1,50}?)(?:[,!.]|\s+for\b|$)/i);
+  if (m && upperStart(m[1])) return { title: null, company: cleanStr(m[1]) };
+
+  // "applying at/to Company for Title" (e.g. "Thank you for applying at AMD for Software Engineer")
+  m = s.match(/\bappl(?:ying|ied)\s+(?:at|to)\s+(.+?)\s+for\s+(.+?)(?:[!.,]|$)/i);
+  if (m && upperStart(m[1])) return clean2(m[2], m[1]);
+
+  // "Title at Company" (e.g. "Software Engineer at Google - Application Confirmation")
   m = s.match(/^(.+?)\s+(?:at|@)\s+([A-Z][a-zA-Z0-9\s&,.']{1,40}?)(?:\s*[-–(|,]|$)/i);
   if (m && !isGenericWord(m[1]) && !isActionPhrase(m[1])) return clean2(m[1], m[2]);
 
-  // "Title – Company" or "Title | Company" (separator style)
+  // "Company | Application | Title" (e.g. "Quora | Application | AI Engineer New Grad 2025-2026")
+  m = s.match(/^([A-Z][a-zA-Z0-9\s&,.'-]{1,40}?)\s*\|\s*application\s*\|\s*(.+?)(?:\s*[|,]|$)/i);
+  if (m && !isGenericWord(m[1]) && !isActionPhrase(m[1])) return clean2(m[2], m[1]);
+
+  // "Title – Company" or "Title | Company" (em-dash / pipe separator)
   m = s.match(/^(.+?)\s*[–—|]\s*(.+?)(?:\s*[–—|,]|$)/);
-  if (m && !isGenericWord(m[1]) && !isActionPhrase(m[1]) && !isActionPhrase(m[2])) {
-    // Heuristic: shorter one after separator is often the company
+  if (m && !isGenericWord(m[1]) && !isActionPhrase(m[1]) && !isGenericWord(m[2]) && !isActionPhrase(m[2])) {
     return clean2(m[1], m[2]);
   }
 
@@ -322,19 +366,21 @@ function parseSubjectForBoth(subject) {
   m = s.match(/(?:application\s+was\s+sent\s+to|sent\s+to)\s+(.+?)(?:\s+for\b|\s*[-–,]|$)/i);
   if (m) return { title: null, company: cleanStr(m[1]) };
 
-  // "Company: Title" or "Company - Title Application"
-  m = s.match(/^([A-Z][a-zA-Z0-9\s&,.']{1,35}?)(?::\s*|\s*-\s*)([A-Z][a-zA-Z0-9\s\/\-&,.']{2,60}?)(?:\s+application|\s+role|\s+position|$)/i);
-  if (m && !isActionPhrase(m[1]) && !isActionPhrase(m[2])) return clean2(m[2], m[1]);
+  // "Company: Title" or "Company - Title" with application/role/position suffix
+  m = s.match(/^([A-Z][a-zA-Z0-9\s&,.']{1,35}?)(?::\s*|\s*-\s*)([A-Z][a-zA-Z0-9\s/\-&,.']{2,60}?)(?:\s+application|\s+role|\s+position|$)/i);
+  if (m && !isActionPhrase(m[1]) && !isGenericWord(m[1]) && !isActionPhrase(m[2])) return clean2(m[2], m[1]);
 
   return { title: null, company: null };
 }
 
 function cleanStr(s) {
   if (!s) return null;
-  let r = s.trim().replace(/\s+/g, ' ').replace(/[!.,;]+$/, '');
-  // Strip common subject prefixes that bleed into capture groups
-  r = r.replace(/^(?:re:|fwd?:|applied:|application:|confirmed?:)\s*/i, '').trim();
-  return r.length > 1 && !isGenericWord(r) && !isActionPhrase(r) ? r : null;
+  let r = s.trim().replace(/\s+/g, ' ').replace(/[!.,;:]+$/, '');
+  r = r.replace(/^(?:re:|fwd?:|applied:|application:|confirmed?:|reminder:|update:|notice:|action\s+required:|important:)\s*/i, '').trim();
+  r = r.replace(/^\[[^\]]*\]\s*/i, '').trim(); // strip [bracketed] prefixes like [Application Update]
+  if (r.length <= 1) return null;
+  if (r.split(/\s+/).length > 8) return null; // too many words to be a job title
+  return !isGenericWord(r) && !isActionPhrase(r) ? r : null;
 }
 
 function clean2(title, company) {
@@ -553,4 +599,4 @@ function parseEmail(message) {
   };
 }
 
-module.exports = { parseEmail, normalizeCompany, STATUS_RANK };
+module.exports = { parseEmail, normalizeCompany, STATUS_RANK, parseSubjectForBoth };

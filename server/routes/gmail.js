@@ -1,7 +1,7 @@
 const express = require('express');
 const { google } = require('googleapis');
 const { getAuthUrl, exchangeCode, getAuthedClient, getStoredTokens, revokeAccess } = require('../services/gmailService');
-const { parseEmail, normalizeCompany, STATUS_RANK } = require('../services/emailParser');
+const { parseEmail, normalizeCompany, STATUS_RANK, parseSubjectForBoth } = require('../services/emailParser');
 const db = require('../db/database');
 
 const router = express.Router();
@@ -326,6 +326,47 @@ router.post('/confirm/:jobId', (req, res) => {
   `).run({ id: req.params.jobId, status: status || existing.status });
 
   res.json(db.prepare('SELECT * FROM jobs WHERE id = ?').get(req.params.jobId));
+});
+
+// ─── Re-parse titles from stored subjects ─────────────────────────────────────
+// Fixes "Unknown Position" entries by re-running improved subject parsing.
+// Safe: only fills in missing titles, never overwrites user-set values.
+router.post('/reparse-titles', (req, res) => {
+  const jobs = db.prepare(`
+    SELECT id, notes, company FROM jobs
+    WHERE job_title = 'Unknown Position' AND source LIKE 'gmail%'
+  `).all();
+
+  let updated = 0;
+  const details = [];
+
+  for (const job of jobs) {
+    const subjectMatch = (job.notes || '').match(/Subject:\s*"([^"]+)"/);
+    if (!subjectMatch) continue;
+
+    const { title } = parseSubjectForBoth(subjectMatch[1]);
+    if (title) {
+      db.prepare('UPDATE jobs SET job_title = ?, updated_at = datetime(\'now\') WHERE id = ?')
+        .run(title, job.id);
+      updated++;
+      details.push({ id: job.id, company: job.company, title });
+    }
+  }
+
+  res.json({ scanned: jobs.length, updated, details });
+});
+
+// ─── Clear Gmail imports (so re-sync will re-process them) ────────────────────
+router.post('/clear-imports', (req, res) => {
+  const { onlyUnknown } = req.body;
+  let stmt;
+  if (onlyUnknown) {
+    stmt = db.prepare(`DELETE FROM jobs WHERE source LIKE 'gmail%' AND job_title = 'Unknown Position'`);
+  } else {
+    stmt = db.prepare(`DELETE FROM jobs WHERE source LIKE 'gmail%'`);
+  }
+  const { changes } = stmt.run();
+  res.json({ deleted: changes });
 });
 
 // ─── Sync history ─────────────────────────────────────────────────────────────
