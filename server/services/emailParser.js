@@ -59,9 +59,11 @@ const STAGE_RULES = [
     phrases: [
       'application received', 'thank you for applying', 'thanks for applying',
       'we received your application', 'application submitted', "you've applied",
+      'you applied', 'applied to', 'your application was sent',
       'application confirmation', 'your application has been received',
       'your application has been submitted', 'successfully applied',
       'confirming your application', 'application acknowledgment',
+      'submission received', 'submission for',
     ],
   },
 ];
@@ -222,29 +224,17 @@ function extractCompanyFromATS(from, subject, body) {
     if (cleaned.length > 2 && cleaned.length < 50 && /[A-Z]/.test(cleaned[0])) return cleaned;
   }
 
-  // Subject patterns first — more concise, less noise
-  const subjectPatterns = [
-    // "sent to / application to / applied to [Company]"
-    /(?:application (?:to|at|for)|applied to|sent to)\s+([A-Z][a-zA-Z0-9\s&,.']{1,50}?)(?:\s*[-–—]|\s+for\b|[,!.]|$)/,
-    // "Something - Company" → company after last dash
-    /[-–—]\s*([A-Z][a-zA-Z0-9\s&,.']{2,40})$/,
-    // "Role | Company"
-    /\|\s*([A-Z][a-zA-Z0-9\s&,.']{2,40})$/,
-  ];
-  for (const p of subjectPatterns) {
-    const m = subject.match(p);
-    if (m) {
-      const candidate = m[1].trim();
-      if (candidate.length > 1 && !isGenericWord(candidate) && !isActionPhrase(candidate)) return candidate;
-    }
-  }
+  // Try to extract company AND title together from the subject line
+  const both = parseSubjectForBoth(subject);
+  if (both.company) return both.company;
 
   // Body patterns — require leading uppercase (no /i flag on capture group)
   const bodyPatterns = [
-    // "thank you for applying to Stripe" — stop at "for" to avoid "applied to SWE at Acme"
     /(?:applying to|thank you for applying to|application to)\s+([A-Z][a-zA-Z0-9\s&,.']{1,40}?)(?:\s+for\b|\s+is\b|\s+has\b|[,!.]|$)/,
     /(?:team at|from the team at|from the folks at|the team at)\s+([A-Z][a-zA-Z0-9\s&,.']{1,50})(?:[,!.]|$)/,
     /^([A-Z][a-zA-Z\s&]{2,40})\s+(?:Recruiting|Talent Acquisition|Talent Team|HR Team|Careers|Hiring Team)/m,
+    // "at [Company]." at end of sentence
+    /\bat\s+([A-Z][a-zA-Z0-9\s&,.']{1,40}?)\s*[.!](?:\s|$)/,
   ];
   for (const pattern of bodyPatterns) {
     const m = body.match(pattern);
@@ -283,21 +273,100 @@ function capitalize(s) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+// Parse subject line and try to return BOTH company and title at once.
+// This is more accurate than parsing them separately.
+function parseSubjectForBoth(subject) {
+  const s = subject.trim();
+  let m;
+
+  // "Application for Title at Company" / "Application for Title - Company"
+  m = s.match(/^(?:re:\s*)?application\s+(?:received\s+)?(?:for|–|-)\s+(.+?)\s+(?:at|@)\s+(.+?)(?:\s*[-–|,]|$)/i);
+  if (m) return clean2(m[1], m[2]);
+
+  // "Application for Title - Company" (dash-separated, no "at")
+  m = s.match(/^(?:re:\s*)?application(?:\s+received)?\s+(?:for|–|-)\s+(.+?)\s*[-–]\s*(.+?)(?:\s*[-–]|$)/i);
+  if (m) return clean2(m[1], m[2]);
+
+  // "Company received your application for Title"
+  m = s.match(/^(.+?)\s+received\s+your\s+application\s+for\s+(.+)/i);
+  if (m) return clean2(m[2], m[1]);  // title=m[2], company=m[1]
+
+  // "Your application for Title at Company"
+  m = s.match(/your\s+application\s+for\s+(?:the\s+)?(.+?)\s+(?:at|@)\s+(.+?)(?:\s*[-–,]|$)/i);
+  if (m) return clean2(m[1], m[2]);
+
+  // "Title at Company - Application..." or "Title at Company (Application...)"
+  m = s.match(/^(.+?)\s+(?:at|@)\s+([A-Z][a-zA-Z0-9\s&,.']{1,40}?)(?:\s*[-–(|,]|$)/i);
+  if (m && !isGenericWord(m[1]) && !isActionPhrase(m[1])) return clean2(m[1], m[2]);
+
+  // "Title – Company" or "Title | Company" (separator style)
+  m = s.match(/^(.+?)\s*[–—|]\s*(.+?)(?:\s*[–—|,]|$)/);
+  if (m && !isGenericWord(m[1]) && !isActionPhrase(m[1]) && !isActionPhrase(m[2])) {
+    // Heuristic: shorter one after separator is often the company
+    return clean2(m[1], m[2]);
+  }
+
+  // "Application received – Title – Company" (two separators)
+  m = s.match(/(?:application\s+received?|received\s+application)\s*[-–—]\s*(.+?)\s*[-–—]\s*(.+?)$/i);
+  if (m) return clean2(m[1], m[2]);
+
+  // "Submission for: Title" (Workday style)
+  m = s.match(/submission\s+for:\s*(.+)/i);
+  if (m) return { title: cleanStr(m[1]), company: null };
+
+  // "Application submitted to Company for Title" (Indeed)
+  m = s.match(/(?:application\s+submitted\s+to|submitted\s+to)\s+(.+?)\s+for\s+(.+?)(?:\s*[-–,]|$)/i);
+  if (m) return clean2(m[2], m[1]);
+
+  // "Your application was sent to Company" (LinkedIn)
+  m = s.match(/(?:application\s+was\s+sent\s+to|sent\s+to)\s+(.+?)(?:\s+for\b|\s*[-–,]|$)/i);
+  if (m) return { title: null, company: cleanStr(m[1]) };
+
+  // "Company: Title" or "Company - Title Application"
+  m = s.match(/^([A-Z][a-zA-Z0-9\s&,.']{1,35}?)(?::\s*|\s*-\s*)([A-Z][a-zA-Z0-9\s\/\-&,.']{2,60}?)(?:\s+application|\s+role|\s+position|$)/i);
+  if (m && !isActionPhrase(m[1]) && !isActionPhrase(m[2])) return clean2(m[2], m[1]);
+
+  return { title: null, company: null };
+}
+
+function cleanStr(s) {
+  if (!s) return null;
+  let r = s.trim().replace(/\s+/g, ' ').replace(/[!.,;]+$/, '');
+  // Strip common subject prefixes that bleed into capture groups
+  r = r.replace(/^(?:re:|fwd?:|applied:|application:|confirmed?:)\s*/i, '').trim();
+  return r.length > 1 && !isGenericWord(r) && !isActionPhrase(r) ? r : null;
+}
+
+function clean2(title, company) {
+  return { title: cleanStr(title), company: cleanStr(company) };
+}
+
 function extractJobTitle(subject, body) {
-  // All patterns require capture group to start with actual uppercase letter (no /i on class)
+  // Try subject first via shared parser
+  const { title: subjectTitle } = parseSubjectForBoth(subject);
+  if (subjectTitle) return subjectTitle;
+
+  // Body patterns — all case-insensitive for the trigger phrase, but capture validated by post-check
   const patterns = [
-    // "for the Software Engineer role" or "for a Senior Dev position"
-    /(?:for the|for a|applied for the|role of|position of)\s+([A-Z][a-zA-Z\s\/\-]{2,60}?)(?:\s+(?:at|position|role)\b|\s*[,!.]|$)/,
-    // "position: Software Engineer" or "role: Senior Dev" with colon
-    /(?:position|role|job title|opening):\s*([A-Z][a-zA-Z\s\/\-]{2,60})(?:[,!.\n]|$)/,
-    // "applied for / to the Software Engineer"
-    /(?:applied for the|applied to the)\s+([A-Z][a-zA-Z\s\/\-]{2,60}?)(?:\s+(?:at|position|role)\b|\s*[,!.]|$)/,
-    // Subject: "Application for Software Engineer - Acme" → capture before dash
-    /^(?:application\s+(?:for|to))\s+([A-Z][a-zA-Z\s\/\-]{2,60}?)(?:\s*[-–@]|\s+at\b)/,
-    // "your application for the Software Engineer"
-    /your application for (?:the\s+)?([A-Z][a-zA-Z\s\/\-]{2,60}?)(?:\s+(?:at|position|role)\b|\s*[,!.]|$)/,
+    // "for the Software Engineer role/position"
+    /(?:for the|for a|for our)\s+([a-zA-Z][a-zA-Z\s\/\-&]{2,60}?)\s+(?:role|position|opening|opportunity)\b/i,
+    // "role: / position: / job title:" with colon
+    /(?:position|role|job title|opening):\s*([a-zA-Z][a-zA-Z\s\/\-&]{2,60})(?:[,!.\n]|$)/i,
+    // "applied for the Software Engineer"
+    /(?:applied for the|applying for the)\s+([a-zA-Z][a-zA-Z\s\/\-&]{2,60}?)(?:\s+at\b|\s*[,!.]|$)/i,
+    // "interest in the [Title] position"
+    /interest in (?:the\s+)?([a-zA-Z][a-zA-Z\s\/\-&]{2,60}?)\s+(?:role|position|opportunity)\b/i,
+    // "your application for [Title]"
+    /your application for (?:the\s+)?([a-zA-Z][a-zA-Z\s\/\-&]{2,60}?)(?:\s+(?:at|position|role)\b|\s*[,!.]|$)/i,
+    // "You applied to / You've applied to [Title] at" (LinkedIn/Handshake)
+    /(?:you(?:'ve|\s+have)?\s+applied\s+to|applied\s+to\s+the)\s+([a-zA-Z][a-zA-Z\s\/\-&]{2,60}?)(?:\s+at\b|\s*[,!.]|$)/i,
+    // "interview for the [Title]"
+    /interview\s+for\s+(?:the\s+)?([a-zA-Z][a-zA-Z\s\/\-&]{2,60}?)(?:\s+(?:at|role|position)\b|\s*[,!.]|$)/i,
+    // "we are excited to have you interview for [Title]"
+    /(?:applied for|applying for)\s+(?:the\s+)?([a-zA-Z][a-zA-Z\s\/\-&]{2,60}?)(?:\s+(?:at|position|role)\b|\s*[,!.]|$)/i,
   ];
-  const text = subject + '\n' + body;
+
+  const text = body;
   for (const p of patterns) {
     const m = text.match(p);
     if (m) {
@@ -416,16 +485,20 @@ function parseEmail(message) {
   if (hasCalendar) {
     const calDate = extractCalendarDateTime(body);
     const company = extractCompanyFromATS(from, subject, body) || 'Unknown Company';
+    let applicationDate;
+    try { applicationDate = new Date(dateStr).toISOString().split('T')[0]; }
+    catch { applicationDate = new Date().toISOString().split('T')[0]; }
     return {
       company,
       job_title: extractJobTitle(subject, body) || 'Interview',
+      application_date: applicationDate,
       status: 'Phone Screen',
       confidence: 'High',
-      matchedPhrases: 1,
       needs_review: 0,
       interview_link: extractInterviewLink(body) || '',
+      last_email_date: applicationDate,
+      gmail_message_id: message.id,
       notes: `Calendar invite received${calDate ? ` — ${calDate}` : ''}`,
-      isCalendarInvite: true,
       source: atsPlatform ? `gmail:${atsPlatform}` : 'gmail',
     };
   }
@@ -437,7 +510,12 @@ function parseEmail(message) {
   const isKnownATS = !!atsPlatform;
   const hasApplicationKeywords = matchedPhrases > 0;
 
-  if (!hasApplicationKeywords && !isKnownATS) {
+  // Is this from a direct corporate email (not ATS, not public provider, not job board)?
+  const isDirectCorporate = !isKnownATS
+    && !PUBLIC_EMAIL_DOMAINS.has(domain)
+    && !JOB_BOARD_DOMAINS.some(jb => domain.endsWith(jb));
+
+  if (!hasApplicationKeywords && !isKnownATS && !isDirectCorporate) {
     return null; // Not a job email at all
   }
 
@@ -446,9 +524,12 @@ function parseEmail(message) {
     return { ignored: true, reason: 'Job board email with no application keywords' };
   }
 
-  const company = extractCompanyFromATS(from, subject, body);
-  const resolvedCompany = company || (atsPlatform ? `Via ${atsPlatform}` : domain.split('.')[0] || 'Unknown');
-  const resolvedTitle = extractJobTitle(subject, body) || 'Unknown Position';
+  // Try subject-line dual-extraction first (most reliable)
+  const subjectBoth = parseSubjectForBoth(subject);
+
+  const company = extractCompanyFromATS(from, subject, body) || subjectBoth.company;
+  const resolvedCompany = company || (atsPlatform ? `Via ${atsPlatform}` : domain.split('.').slice(-2, -1)[0] || 'Unknown');
+  const resolvedTitle = subjectBoth.title || extractJobTitle(subject, body) || null;
   const resolvedStatus = status || 'Applied';
   const resolvedConfidence = status ? confidence : 'Low';
   const needsReview = resolvedConfidence === 'Low' || !status || !company;
@@ -459,7 +540,7 @@ function parseEmail(message) {
 
   return {
     company: resolvedCompany,
-    job_title: resolvedTitle,
+    job_title: resolvedTitle || null,  // null = let UI show TBD rather than "Unknown Position"
     application_date: applicationDate,
     status: resolvedStatus,
     confidence: resolvedConfidence,

@@ -81,6 +81,7 @@ router.post('/sync', async (_req, res) => {
   // Broad query covering all stages
   const query = [
     `after:${after}`,
+    'in:anywhere',   // include Trash, Spam, All Mail
     '(',
     // Application confirmations
     'subject:("application received") OR',
@@ -134,6 +135,7 @@ router.post('/sync', async (_req, res) => {
     do {
       const listRes = await gmail.users.messages.list({
         userId: 'me', q: query, maxResults: 100,
+        includeSpamTrash: true,   // scan Trash and Spam too
         ...(pageToken && { pageToken }),
       });
       allMessageIds.push(...(listRes.data.messages || []));
@@ -197,7 +199,14 @@ router.post('/sync', async (_req, res) => {
       continue;
     }
 
-    const parsed = parseEmail(msgData);
+    let parsed;
+    try {
+      parsed = parseEmail(msgData);
+    } catch (e) {
+      results.skipped++;
+      results.details.push({ id, outcome: 'error', reason: 'Parse error: ' + e.message });
+      continue;
+    }
 
     if (!parsed) {
       results.skipped++;
@@ -210,6 +219,16 @@ router.post('/sync', async (_req, res) => {
       results.details.push({ id, outcome: 'ignored', reason: parsed.reason });
       continue;
     }
+
+    // Defensive fallbacks so a missing field never crashes the insert
+    const today = new Date().toISOString().split('T')[0];
+    parsed.application_date = parsed.application_date || today;
+    parsed.last_email_date  = parsed.last_email_date  || today;
+    parsed.interview_link   = parsed.interview_link   || '';
+    parsed.notes            = parsed.notes            || '';
+    parsed.confidence       = parsed.confidence       || 'Low';
+    parsed.needs_review     = parsed.needs_review     ?? 1;
+    parsed.job_title        = parsed.job_title        || '(title unknown)';
 
     // Unclassified — low confidence, needs manual review
     if (parsed.needs_review && parsed.status === 'Applied' && parsed.confidence === 'Low') {
@@ -259,7 +278,6 @@ router.post('/sync', async (_req, res) => {
       }
     } else {
       // New job entry
-      const today = new Date().toISOString().split('T')[0];
       const result = insertJob.run({
         ...parsed,
         status_changed_date: parsed.application_date || today,
